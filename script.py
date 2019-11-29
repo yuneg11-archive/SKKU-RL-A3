@@ -4,10 +4,12 @@ import numpy as np
 import gym
 from dqn import DQN
 
+STEPS = 1000
+LOG = False
+
 default, double, multistep, per = False, False, False, False
 
 if len(sys.argv) == 1:
-    # Default DQN
     print("There is no argument, please input")
 
 for i in range(1, len(sys.argv)):
@@ -30,36 +32,52 @@ pers = None
 if default:
     env.reset()
     dqn = DQN(env, double_q=False, per=False, multistep=False)
-    defaults = dqn.learn(1500)
+    defaults = dqn.learn(STEPS)
     del dqn
 if double:
     env.reset()
     dqn = DQN(env, double_q=True, per=False, multistep=False)
-    doubles = dqn.learn(1500)
+    doubles = dqn.learn(STEPS)
     del dqn
 if multistep:
     env.reset()
     dqn = DQN(env, double_q=False, per=False, multistep=True)
-    multisteps = dqn.learn(1500)
+    multisteps = dqn.learn(STEPS)
     del dqn
 if per:
     env.reset()
     dqn = DQN(env, double_q=False, per=True, multistep=False)
-    pers = dqn.learn(1500)
+    pers = dqn.learn(STEPS)
     del dqn
 
 print("Reinforcement Learning Finish")
 print("Draw graph ... ")
 
-x = np.arange(1500)
+x = np.arange(STEPS)
 
 if default:
+    if LOG:
+        log = open("defaults.txt", "w")
+        log.write("\n".join([str(avg) for avg in defaults]))
+        log.close()
     plt.plot(x, defaults, label='DQN')
 if double:
+    if LOG:
+        log = open("doubles.txt", "w")
+        log.write("\n".join([str(avg) for avg in doubles]))
+        log.close()
     plt.plot(x, doubles, label='Double')
 if multistep:
+    if LOG:
+        log = open("multisteps.txt", "w")
+        log.write("\n".join([str(avg) for avg in multisteps]))
+        log.close()
     plt.plot(x, multisteps, label='Multistep')
 if per:
+    if LOG:
+        log = open("pers.txt", "w")
+        log.write("\n".join([str(avg) for avg in pers]))
+        log.close()
     plt.plot(x, pers, label='PER')
 
 plt.legend()
