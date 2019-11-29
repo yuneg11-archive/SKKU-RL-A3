@@ -59,7 +59,8 @@ class DQN:
         target_policy = np.array(self.target_network.predict_on_batch(next_states))
         for idx, experience in enumerate(minibatch):
             _, action, reward, _, done = experience
-            policy[idx, action] = reward if done else reward + self.gamma * np.max(target_policy[idx])
+            target_action = np.argmax(policy[idx]) if self.double_q else np.argmax(target_policy[idx])
+            policy[idx, action] = reward if done else reward + self.gamma * target_policy[idx, target_action]
         self.network.train_on_batch(x=states, y=policy)
 
     def learn(self, max_episode: int = 1000):
