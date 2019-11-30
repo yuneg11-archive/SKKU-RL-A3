@@ -17,6 +17,55 @@ EPSILON_MIN = 0.01
 EPSILON_DECAY = 0.95
 
 
+class ReplayMemory:
+    def __init__(self, memory_size, multistep_len=0, gamma=0.0):
+        # Normal Memory
+        self.data_state = deque(maxlen=memory_size)
+        self.data_action = deque(maxlen=memory_size)
+        self.data_reward = deque(maxlen=memory_size)
+        self.data_next_state = deque(maxlen=memory_size)
+        self.data_done = deque(maxlen=memory_size)
+        self.add = self.multistep_add if multistep_len > 0 else self.single_add
+        # Multistep Memory
+        self.temp_memory = deque(maxlen=multistep_len)
+        self.multistep_len = multistep_len
+        self.gamma = gamma
+
+    def __len__(self):
+        return len(self.data_state)
+
+    def single_add(self, state, action, reward, next_state, done):
+        self.data_state.append(tuple(state))
+        self.data_action.append(action)
+        self.data_reward.append(reward)
+        self.data_next_state.append(tuple(next_state))
+        self.data_done.append(done)
+
+    def multistep_add(self, state, action, reward, next_state, done):
+        self.temp_memory.append((state, action, reward, next_state, done))
+        if done:
+            while len(self.temp_memory) > 0:
+                self.single_add(*self.get_multistep_experience())
+        elif len(self.temp_memory) == self.multistep_len:
+            self.single_add(*self.get_multistep_experience())
+
+    def get_multistep_experience(self):
+        state, action, reward, _, _ = self.temp_memory[0]
+        _, _, _, next_state, done = self.temp_memory[-1]
+        reward += sum([(self.gamma ** (idx + 1)) * exp[2] for idx, exp in enumerate(self.temp_memory)])
+        self.temp_memory.popleft()
+        return state, action, reward, next_state, done
+
+    def sample(self, sample_size):
+        idxs = np.random.choice(len(self), sample_size)
+        states = [self.data_state[idx] for idx in idxs]
+        actions = [self.data_action[idx] for idx in idxs]
+        rewards = [self.data_reward[idx] for idx in idxs]
+        next_states = [self.data_next_state[idx] for idx in idxs]
+        dones = [self.data_done[idx] for idx in idxs]
+        return states, actions, rewards, next_states, dones
+
+
 class DQN:
     def __init__(self, env, double_q=False, multistep=False, per=False):
         # Environment
@@ -27,7 +76,7 @@ class DQN:
         self.double_q = double_q
         self.per = per
         self.multistep = multistep
-        self.multistep_len = MULTISTEP_LEN
+        self.multistep_len = MULTISTEP_LEN if multistep else 0
         # Parameter
         self.gamma = DISCOUNT_RATE
         self.learning_rate = LEARNING_RATE
@@ -35,7 +84,7 @@ class DQN:
         # Network and Memory
         self.network = self._build_network()
         self.target_network = self._build_network()
-        self.replay_memory = deque(maxlen=REPLAY_MEMORY_SIZE)
+        self.replay_memory = ReplayMemory(REPLAY_MEMORY_SIZE, self.state_size, self.multistep_len, self.gamma)
 
     def _build_network(self):
         network = models.Sequential([
@@ -53,24 +102,15 @@ class DQN:
         else:
             return np.random.choice(self.action_size)
 
-    def train_minibatch(self, minibatch):
-        states = np.array([experience[0] for experience in minibatch])
-        next_states = np.array([experience[3] for experience in minibatch])
-        policy = np.array(self.network.predict_on_batch(states))
-        target_policy = np.array(self.target_network.predict_on_batch(next_states))
-        for idx, experience in enumerate(minibatch):
-            _, action, reward, _, done = experience
-            target_action = np.argmax(policy[idx]) if self.double_q else np.argmax(target_policy[idx])
+    def train_minibatch(self, states, actions, rewards, next_states, dones):
+        states, next_states = np.array(states), np.array(next_states)
+        policies = np.array(self.network.predict_on_batch(states))
+        target_policies = self.target_network.predict_on_batch(next_states)
+        for policy, action, reward, target_policy, done in zip(policies, actions, rewards, target_policies, dones):
+            target_action = np.argmax(policy) if self.double_q else np.argmax(target_policy)
             gamma = (self.gamma ** self.multistep_len) if self.multistep else self.gamma
-            policy[idx, action] = reward if done else reward + gamma * target_policy[idx, target_action]
-        self.network.train_on_batch(x=states, y=policy)
-
-    def multistep_experience(self, temp_replay_memory):
-        state_s, action_s, reward_s, _, _ = temp_replay_memory[0]
-        _, _, _, next_state_e, done_e = temp_replay_memory[-1]
-        reward_s += sum([(self.gamma ** (idx + 1)) * exp[2] for idx, exp in enumerate(temp_replay_memory)])
-        temp_replay_memory.popleft()
-        return state_s, action_s, reward_s, next_state_e, done_e
+            policy[action] = reward if done else reward + gamma * target_policy[target_action]
+        self.network.train_on_batch(x=states, y=policies)
 
     def learn(self, max_episode: int = 1000):
         episode_record = list()
@@ -80,7 +120,7 @@ class DQN:
         epsilon_decay = EPSILON_DECAY
 
         print("=" * 68)
-        print(f"      Double: {self.double_q}\t  Multistep: {self.multistep}/{self.multistep_len}\t   PER: {self.per}")
+        print(f"- Double: {self.double_q}   - Multistep: {self.multistep}/{self.multistep_len}   - PER: {self.per}")
         print("=" * 68)
 
         for episode in range(max_episode):
@@ -88,28 +128,18 @@ class DQN:
             state = self.env.reset()
             done = False
             total_reward = 0
-            temp_replay_memory = deque(maxlen=self.multistep_len)
 
             while not done:
                 action = self.predict(state, epsilon)
                 next_state, reward, done, _ = self.env.step(action)
 
-                if self.multistep:
-                    temp_replay_memory.append((state, action, reward, next_state, done))
-                    if len(temp_replay_memory) == self.multistep_len:
-                        self.replay_memory.append(self.multistep_experience(temp_replay_memory))
-                else:
-                    self.replay_memory.append((state, action, reward, next_state, done))
+                self.replay_memory.add(state, action, reward, next_state, done)
 
                 total_reward += reward
                 state = next_state
 
                 if len(self.replay_memory) > self.minibatch_size:
-                    self.train_minibatch(random.sample(self.replay_memory, self.minibatch_size))
-
-            if self.multistep:
-                while len(temp_replay_memory) > 0:
-                    self.replay_memory.append(self.multistep_experience(temp_replay_memory))
+                    self.train_minibatch(*self.replay_memory.sample(self.minibatch_size))
 
             self.target_network.set_weights(self.network.get_weights())
             epsilon = max(epsilon * epsilon_decay, epsilon_min)
