@@ -13,7 +13,7 @@ MINIBATCH_SIZE = 64
 MULTISTEP_LEN = 3
 PRIORITY_RATE = 0.6
 PRIORITY_ADJUST_START = 0.5
-PRIORITY_EPSILON = 0.001
+PRIORITY_EPSILON = 0.00001
 
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
@@ -76,7 +76,7 @@ class ReplayMemory:
         idxs = np.random.choice(len(self), sample_size, p=probabilities)
 
         beta = self.beta + (1 - self.beta) * progress
-        weights_raw = np.power(probabilities * len(self), -beta)
+        weights_raw = np.power(probabilities, -beta)
         weights = (weights_raw / np.max(weights_raw))[idxs]
         return idxs, weights
 
@@ -166,6 +166,7 @@ class DQN:
 
         print("=" * 68)
         print(f"- Double: {self.double_q}   - Multistep: {self.multistep}/{self.multistep_len}   - PER: {self.per}")
+        # print("- Double: {}   - Multistep: {}/{}   - PER: {}".format(self.double_q, self.multistep, self.multistep_len, self.per))
         print("=" * 68)
 
         for episode in range(max_episode):
@@ -194,5 +195,6 @@ class DQN:
             episode_record.append(avg_episode_rewards)
             episode_time = time.time() - start_time
             print(f"[Episode {episode:5d}] Steps: {-total_reward:3.0f} | Avg reward: {avg_episode_rewards:8.3f} | Time: {episode_time:.3f} secs")
+            # print("[Episode {:5d}] Steps: {:3.0f} | Avg reward: {:8.3f} | Time: {:.3f} secs".format(episode, -total_reward, avg_episode_rewards, episode_time))
 
         return episode_record
