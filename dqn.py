@@ -11,6 +11,9 @@ LEARNING_RATE = 0.001
 REPLAY_MEMORY_SIZE = 30000
 MINIBATCH_SIZE = 64
 MULTISTEP_LEN = 3
+PRIORITY_RATE = 0.6
+PRIORITY_ADJUST_START = 0.5
+PRIORITY_EPSILON = 0.001
 
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
@@ -18,7 +21,7 @@ EPSILON_DECAY = 0.95
 
 
 class ReplayMemory:
-    def __init__(self, memory_size, multistep_len=0, gamma=0.0):
+    def __init__(self, memory_size, multistep_len=0, gamma=0.0, alpha=0.0, beta=1.0):
         # Normal Memory
         self.data_state = deque(maxlen=memory_size)
         self.data_action = deque(maxlen=memory_size)
@@ -26,10 +29,15 @@ class ReplayMemory:
         self.data_next_state = deque(maxlen=memory_size)
         self.data_done = deque(maxlen=memory_size)
         self.add = self.multistep_add if multistep_len > 0 else self.single_add
+        self.sample_idx = self.per_idx if alpha > 0.0 and beta < 1.0 else self.uniform_idx
         # Multistep Memory
         self.temp_memory = deque(maxlen=multistep_len)
         self.multistep_len = multistep_len
         self.gamma = gamma
+        # Prioritized Experience Replay
+        self.priority_alpha = deque(maxlen=memory_size)
+        self.alpha = alpha  # Suppress priority if alpha == 0.0
+        self.beta = beta  # Compensate priority if beta == 1.0
 
     def __len__(self):
         return len(self.data_state)
@@ -40,30 +48,51 @@ class ReplayMemory:
         self.data_reward.append(reward)
         self.data_next_state.append(tuple(next_state))
         self.data_done.append(done)
+        if self.alpha > 0.0 and self.beta < 1.0:
+            self.priority_alpha.append(max(self.priority_alpha) if len(self.priority_alpha) > 0 else 1)
 
     def multistep_add(self, state, action, reward, next_state, done):
         self.temp_memory.append((state, action, reward, next_state, done))
         if done:
             while len(self.temp_memory) > 0:
-                self.single_add(*self.get_multistep_experience())
+                self.single_add(*self.multistep_experience())
         elif len(self.temp_memory) == self.multistep_len:
-            self.single_add(*self.get_multistep_experience())
+            self.single_add(*self.multistep_experience())
 
-    def get_multistep_experience(self):
+    def multistep_experience(self):
         state, action, reward, _, _ = self.temp_memory[0]
         _, _, _, next_state, done = self.temp_memory[-1]
         reward += sum([(self.gamma ** (idx + 1)) * exp[2] for idx, exp in enumerate(self.temp_memory)])
         self.temp_memory.popleft()
         return state, action, reward, next_state, done
 
-    def sample(self, sample_size):
+    def uniform_idx(self, sample_size, progress=None):
         idxs = np.random.choice(len(self), sample_size)
+        return idxs, None
+
+    def per_idx(self, sample_size, progress):
+        priority_alphas = np.array(self.priority_alpha)
+        probabilities = priority_alphas / np.sum(priority_alphas)
+        idxs = np.random.choice(len(self), sample_size, p=probabilities)
+
+        beta = self.beta + (1 - self.beta) * progress
+        weights_raw = np.power(probabilities * len(self), -beta)
+        weights = (weights_raw / np.max(weights_raw))[idxs]
+        return idxs, weights
+
+    def sample(self, sample_size, progress):
+        idxs, weights = self.sample_idx(sample_size, progress)
         states = [self.data_state[idx] for idx in idxs]
         actions = [self.data_action[idx] for idx in idxs]
         rewards = [self.data_reward[idx] for idx in idxs]
         next_states = [self.data_next_state[idx] for idx in idxs]
         dones = [self.data_done[idx] for idx in idxs]
-        return states, actions, rewards, next_states, dones
+
+        return idxs, states, actions, rewards, next_states, dones, weights
+
+    def update_priority(self, idxs, priority_alphas):
+        for idx, priority_alpha in zip(idxs, priority_alphas):
+            self.priority_alpha[idx] = priority_alpha
 
 
 class DQN:
@@ -81,10 +110,13 @@ class DQN:
         self.gamma = DISCOUNT_RATE
         self.learning_rate = LEARNING_RATE
         self.minibatch_size = MINIBATCH_SIZE
+        self.alpha = PRIORITY_RATE if per else 0.0
+        self.beta = PRIORITY_ADJUST_START if per else 1.0
+        self.priority_epsilon = PRIORITY_EPSILON
         # Network and Memory
         self.network = self._build_network()
         self.target_network = self._build_network()
-        self.replay_memory = ReplayMemory(REPLAY_MEMORY_SIZE, self.state_size, self.multistep_len, self.gamma)
+        self.replay_memory = ReplayMemory(REPLAY_MEMORY_SIZE, self.multistep_len, self.gamma, self.alpha, self.beta)
 
     def _build_network(self):
         network = models.Sequential([
@@ -102,15 +134,28 @@ class DQN:
         else:
             return np.random.choice(self.action_size)
 
-    def train_minibatch(self, states, actions, rewards, next_states, dones):
+    def train_minibatch(self, progress):
+        idxs, states, actions, rewards, next_states, dones, weights = self.replay_memory.sample(self.minibatch_size, progress)
         states, next_states = np.array(states), np.array(next_states)
+
         policies = np.array(self.network.predict_on_batch(states))
         target_policies = self.target_network.predict_on_batch(next_states)
+
+        priority_alphas = list()
         for policy, action, reward, target_policy, done in zip(policies, actions, rewards, target_policies, dones):
             target_action = np.argmax(policy) if self.double_q else np.argmax(target_policy)
             gamma = (self.gamma ** self.multistep_len) if self.multistep else self.gamma
-            policy[action] = reward if done else reward + gamma * target_policy[target_action]
-        self.network.train_on_batch(x=states, y=policies)
+            expectation = reward if done else reward + gamma * target_policy[target_action]
+            if self.per:
+                loss = expectation - policy[action]
+                priority_alphas.append((abs(loss) + self.priority_epsilon) ** self.alpha)
+            policy[action] = expectation
+
+        if self.per:
+            self.replay_memory.update_priority(idxs, priority_alphas)
+
+        sample_weights = weights if self.per else None
+        self.network.train_on_batch(x=states, y=policies, sample_weight=sample_weights)
 
     def learn(self, max_episode: int = 1000):
         episode_record = list()
@@ -139,7 +184,7 @@ class DQN:
                 state = next_state
 
                 if len(self.replay_memory) > self.minibatch_size:
-                    self.train_minibatch(*self.replay_memory.sample(self.minibatch_size))
+                    self.train_minibatch(episode / max_episode)
 
             self.target_network.set_weights(self.network.get_weights())
             epsilon = max(epsilon * epsilon_decay, epsilon_min)
